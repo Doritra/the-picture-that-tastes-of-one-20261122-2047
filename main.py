@@ -1,27 +1,23 @@
-"""Entry for the-picture-that-tastes-of-one-20261122-2047.
+"""Entry point: copy the built image to the output directory, byte for byte.
 
-The repository ships the finished picture as entry.png: one ripe
-strawberry, macro and glossy, drawn procedurally by build_image.py
-(1024x1024, under 300 KB). This program copies that image to the
-output directory, byte for byte, with no network use.
-
-Outside the grader, MAKEFUN_OUTPUT_DIR stands in for /output:
-    mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
+No network, no image processing here -- the picture is produced by
+build_image.py and committed as entry.png.
 """
-
 import os
 import shutil
-from pathlib import Path
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def main() -> None:
-    # Revision 2: the narrower berry with small golden achenes,
-    # a softer gloss and fewer, subtler droplets.
-    out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    source = Path(__file__).resolve().parent / "entry.png"
-    shutil.copyfile(source, out_dir / "entry.png")
+def main():
+    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+    os.makedirs(out_dir, exist_ok=True)
+    src = os.path.join(HERE, "entry.png")
+    dst = os.path.join(out_dir, "entry.png")
+    shutil.copyfile(src, dst)
+    print(f"wrote {dst} ({os.path.getsize(dst)} bytes)")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

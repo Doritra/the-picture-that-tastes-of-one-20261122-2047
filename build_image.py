@@ -1,236 +1,196 @@
-"""Render the entry image: one strawberry, macro, glossy, dripping-fresh.
+"""Draw one ripe strawberry, macro, glossy, on a dark moody background.
 
-A single ripe strawberry fills the frame against a dark moody
-background: scarlet flesh with a soft radial light, pale achenes in
-curved rows, a fresh green calyx, water droplets and a hard specular
-gloss. Everything is drawn procedurally with numpy + Pillow; no
-external assets, no network. Output is 1024x1024 PNG, well under 1 MiB.
-
-Run:  python3 build_image.py   (writes entry.png next to this file)
+Fully procedural: numpy for gradients/shading, Pillow for drawing.
+No external assets, no network. Output: entry.png (1024x1024).
 """
-
 import math
-import random
+import os
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageEnhance
+from PIL import Image, ImageDraw, ImageFilter
 
 W = H = 1024
-random.seed(20261122)
-np.random.seed(20261122)
+rng = np.random.default_rng(7)
 
-CX, TOP, BOT = 512, 268, 948  # body centre-x, top and tip of the berry
-HALF_W = 292                   # max half width of the body
+# ---------------------------------------------------------------- background
+yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+# dark radial backdrop, slightly warm behind the berry
+dx = (xx - 512) / 512.0
+dy = (yy - 470) / 512.0
+r2 = dx * dx + dy * dy
+glow = np.exp(-r2 * 2.2)                      # warm halo behind fruit
+base = np.zeros((H, W, 3), np.float32)
+base[..., 0] = 14 + 46 * glow                  # deep maroon-black
+base[..., 1] = 10 + 12 * glow
+base[..., 2] = 12 + 16 * glow
+# gentle top light falloff
+base *= (0.92 + 0.10 * np.exp(-((yy - 120) ** 2) / (2 * 420.0 ** 2)))[..., None]
 
-
-def body_half_width(s: float) -> float:
-    """Half width of the berry at normalised height s (0 top, 1 tip)."""
-    # Wide shoulders, long taper to a rounded tip.
-    base = math.sin(math.pi * (0.12 + 0.88 * s)) ** 0.62
-    shoulder = 1.0 - 0.22 * math.exp(-((s - 0.18) ** 2) / 0.02)
-    tip = 1.0 - 0.55 * max(0.0, s - 0.82) ** 2 * 6.0
-    # Narrow the flat top: shoulders slope in toward the calyx.
-    top_taper = 0.62 + 0.38 * min(max((s - 0.02) / 0.16, 0.0), 1.0)
-    return HALF_W * base * shoulder * max(tip, 0.12) * top_taper
-
-
-def body_outline() -> list:
-    """Polygon points of the berry outline, clockwise from top centre."""
-    pts = []
-    n = 140
-    for i in range(n + 1):
-        s = i / n
-        y = TOP + s * (BOT - TOP)
-        hw = body_half_width(s)
-        # Slight dip at the top centre where the calyx sits.
-        dip = 26 * math.exp(-((s) ** 2) / 0.004) if s < 0.12 else 0
-        pts.append((CX - hw, y + dip))
-    for i in range(n, -1, -1):
-        s = i / n
-        y = TOP + s * (BOT - TOP)
-        hw = body_half_width(s)
-        dip = 26 * math.exp(-((s) ** 2) / 0.004) if s < 0.12 else 0
-        pts.append((CX + hw, y + dip))
-    return pts
+# ---------------------------------------------------------------- berry body
+# Profile: wide shoulders at top, tapering to a soft point at the bottom.
+y0, y1 = 285.0, 965.0
 
 
-def background() -> Image.Image:
-    """Dark green-charcoal gradient with soft warm bokeh and vignette."""
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-    t = yy / H
-    top = np.array([16, 26, 18], dtype=np.float32)
-    bot = np.array([7, 12, 9], dtype=np.float32)
-    arr = top[None, None, :] * (1 - t)[..., None] + bot[None, None, :] * t[..., None]
-    img = Image.fromarray(arr.astype(np.uint8), "RGB").convert("RGBA")
-    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(glow)
-    for (bx, by, br, col, al) in [
-        (180, 180, 90, (120, 160, 90), 26),
-        (880, 150, 70, (190, 150, 60), 22),
-        (920, 830, 110, (90, 130, 70), 20),
-        (120, 860, 80, (150, 120, 50), 18),
-        (512, 90, 130, (70, 110, 60), 16),
-    ]:
-        gd.ellipse([bx - br, by - br, bx + br, by + br], fill=col + (al,))
-    glow = glow.filter(ImageFilter.GaussianBlur(38))
-    img.alpha_composite(glow)
-    # Vignette: darken the corners.
-    vig = Image.new("L", (W, H), 0)
-    vd = ImageDraw.Draw(vig)
-    vd.ellipse([-260, -260, W + 260, H + 260], fill=255)
-    vig = vig.filter(ImageFilter.GaussianBlur(180))
-    black = Image.new("RGBA", (W, H), (0, 0, 0, 255))
-    img = Image.composite(img, black, vig.point(lambda v: 255 - int(0.42 * (255 - v))))
-    return img.convert("RGB")
+def half_width(t):
+    t = np.clip(t, 0.0, 1.0)
+    w = 358.0 * np.sqrt(np.clip(1.0 - t ** 2.6, 0.0, 1.0)) * (1.0 - 0.12 * t)
+    # rounded shoulder cap: narrow smoothly toward the flat-ish top
+    cap = np.where(t < 0.10,
+                   0.42 + 0.58 * np.sqrt(np.clip(1.0 - (1.0 - t / 0.10) ** 2, 0, 1)),
+                   1.0)
+    return w * cap
 
 
-def berry_body() -> Image.Image:
-    """The red flesh: radial light, edge darkening, fine grain, streaks."""
-    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
-    mask = Image.new("L", (W, H), 0)
-    ImageDraw.Draw(mask).polygon(body_outline(), fill=255)
-    mask = mask.filter(ImageFilter.GaussianBlur(1.6))
-    m = np.asarray(mask, dtype=np.float32) / 255.0
-
-    # Normalised position inside the berry (approx: distance from centre).
-    dx = (xx - (CX - 120)) / 620.0
-    dy = (yy - (TOP + 190)) / 700.0
-    r = np.sqrt(dx * dx + dy * dy)
-    light = np.clip(1.0 - r * 1.15, 0, 1) ** 1.6
-
-    # Base reds: bright scarlet where lit, deep crimson in shadow.
-    lit = np.array([255, 74, 56], dtype=np.float32)
-    mid = np.array([214, 28, 38], dtype=np.float32)
-    dark = np.array([122, 12, 26], dtype=np.float32)
-    col = mid[None, None, :] * (1 - light)[..., None] + lit[None, None, :] * light[..., None]
-    # Deepen toward the lower right and the rim.
-    edge = np.clip((r - 0.55) * 2.2, 0, 1)
-    col = col * (1 - 0.45 * edge[..., None]) + dark[None, None, :] * (0.45 * edge[..., None])
-    # Warm bottom glow, cool top sheen.
-    col[..., 0] += 14 * np.clip(1 - yy / H, 0, 1) * m
-    # Fine organic grain.
-    grain = np.random.normal(0, 1, (H, W)).astype(np.float32)
-    grain = np.asarray(Image.fromarray(((grain - grain.min()) / (grain.ptp()) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(1.2)), dtype=np.float32)
-    col += (grain[..., None] - 128) * 0.10
-    # Faint vertical fibre streaks.
-    streak = np.sin(xx * 0.11 + np.sin(yy * 0.02) * 6.0) * 5.0
-    col += streak[..., None]
-
-    arr = np.clip(col, 0, 255).astype(np.uint8)
-    img = Image.fromarray(arr, "RGB").convert("RGBA")
-    img.putalpha(Image.fromarray((m * 255).astype(np.uint8), "L"))
-    return img
+def centre_x(t):
+    return 512.0 + 14.0 * np.sin(t * 2.4) - 6.0 * t
 
 
-def seeds_layer() -> Image.Image:
-    """Pale achenes in curved rows, each with a soft shadow pit."""
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    rows = 9
-    for ri in range(rows):
-        s = 0.12 + 0.78 * ri / (rows - 1)
-        y = TOP + s * (BOT - TOP)
-        hw = body_half_width(s) * 0.88
-        n = max(3, int(hw / 62))
-        for ci in range(-n, n + 1):
-            fx = ci / max(n, 1)
-            x = CX + fx * hw + (12 if ri % 2 else -12) * (1 - abs(fx))
-            if abs(x - CX) > hw:
-                continue
-            depth = 1 - abs(fx) * 0.45          # seeds shrink toward the rim
-            rx, ry = 7 * depth, 10 * depth
-            ang = math.degrees(math.atan2(x - CX, 260)) * 0.6
-            # Shadow pit, then the small golden seed sunk into it.
-            d.ellipse([x - rx - 1, y - ry + 2, x + rx + 3, y + ry + 4],
-                      fill=(96, 10, 20, 170))
-            d.ellipse([x - rx, y - ry, x + rx, y + ry], fill=(232, 201, 120, 255))
-            d.ellipse([x - rx * 0.45, y - ry * 0.55, x + rx * 0.1, y - ry * 0.05],
-                      fill=(252, 238, 180, 255))
-    return layer.filter(ImageFilter.GaussianBlur(0.6))
+t_grid = (yy - y0) / (y1 - y0)
+in_y = (yy >= y0) & (yy <= y1)
+hw = half_width(np.clip(t_grid, 0, 1))
+cx = centre_x(np.clip(t_grid, 0, 1))
+body = in_y & (np.abs(xx - cx) <= hw)
+# soften the outline a touch
+mask = Image.fromarray((body * 255).astype(np.uint8)).filter(
+    ImageFilter.GaussianBlur(1.2))
+mask_f = np.asarray(mask, np.float32) / 255.0
 
+# distance from outline -> edge darkening (fresnel-like rim)
+edge = Image.fromarray((body * 255).astype(np.uint8)).filter(
+    ImageFilter.GaussianBlur(26))
+edge_f = np.asarray(edge, np.float32) / 255.0
+rim = np.clip(edge_f, 0, 1)  # 1 deep inside, 0 outside
 
-def calyx_layer() -> Image.Image:
-    """Fresh green star leaves + stem at the top of the berry."""
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    cx, cy = CX, TOP + 6
-    leaves = [
-        (-120, -30, 0.92), (-70, -58, 1.0), (-15, -70, 1.05),
-        (45, -68, 1.02), (100, -52, 0.96), (140, -26, 0.88),
-        (-150, 4, 0.78), (150, 6, 0.78),
-    ]
-    for dx, dy, sc in leaves:
-        tip = (cx + dx * 1.15 * sc, cy + dy * 1.35 * sc)
-        base_l = (cx + dx * 0.28 - 30 * sc, cy + dy * 0.28 + 12)
-        base_r = (cx + dx * 0.28 + 30 * sc, cy + dy * 0.28 + 12)
-        mid_l = (cx + dx * 0.85 - 16 * sc, cy + dy * 0.85)
-        mid_r = (cx + dx * 0.85 + 16 * sc, cy + dy * 0.85)
-        d.polygon([base_l, mid_l, tip, mid_r, base_r], fill=(38, 102, 44, 255))
-        d.line([cx, cy, tip[0], tip[1]], fill=(22, 66, 30, 255), width=3)
-    # Centre cap + stem.
-    d.ellipse([cx - 52, cy - 26, cx + 52, cy + 26], fill=(58, 140, 62, 255))
-    d.ellipse([cx - 30, cy - 34, cx + 30, cy - 2], fill=(110, 190, 96, 255))
-    d.polygon([(cx - 13, cy - 30), (cx + 13, cy - 30), (cx + 20, cy - 118),
-               (cx - 6, cy - 118)], fill=(58, 122, 52, 255))
-    d.line([(cx + 4, cy - 32), (cx + 8, cy - 112)], fill=(96, 170, 84, 255), width=4)
-    return layer
+# radial light from upper-left (stronger, juicier highlight)
+lx, ly = 390.0, 240.0
+ld = np.sqrt((xx - lx) ** 2 + (yy - ly) ** 2) / 900.0
+light = np.exp(-ld * ld * 2.0)
+light = 0.30 + 1.05 * light
+# vertical shading: brighter shoulders, darker toward the tip
+vert = 1.0 - 0.45 * np.clip(t_grid, 0, 1) ** 1.6
+# cool shadow on the right side
+side = 0.82 + 0.28 * np.clip((cx - xx) / 360.0, -1, 1)
 
+shade = light * vert * side * (0.45 + 0.55 * rim)
+# red palette: highlight salmon -> ripe crimson -> deep wine
+hi = np.array([255, 122, 102], np.float32)
+mid = np.array([224, 32, 48], np.float32)
+lo = np.array([122, 8, 24], np.float32)
+s = np.clip(shade, 0, 1.25)[..., None]
+berry = np.where(s > 0.62,
+                 mid + (hi - mid) * np.clip((s - 0.62) / 0.63, 0, 1),
+                 lo + (mid - lo) * np.clip(s / 0.62, 0, 1))
+# faint vertical ribbing (real strawberries have subtle ridges)
+rib = 1.0 + 0.05 * np.sin((xx - cx) * 0.055) * np.sin(t_grid * 9.0)
+berry *= rib[..., None]
 
-def gloss_layer() -> Image.Image:
-    """Hard specular gloss upper-left + thin rim light on the left edge."""
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    d.ellipse([CX - 300, TOP + 40, CX - 40, TOP + 330], fill=(255, 255, 255, 55))
-    d.ellipse([CX - 250, TOP + 90, CX - 120, TOP + 240], fill=(255, 255, 255, 80))
-    layer = layer.filter(ImageFilter.GaussianBlur(26))
-    # Rim light: a soft bright arc hugging the left shoulder.
-    rim = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    rd = ImageDraw.Draw(rim)
-    pts = []
-    for i in range(61):
-        s = 0.06 + 0.5 * i / 60
-        y = TOP + s * (BOT - TOP)
-        pts.append((CX - body_half_width(s) + 6, y))
-    rd.line(pts, fill=(255, 210, 190, 170), width=7)
-    rim = rim.filter(ImageFilter.GaussianBlur(6))
-    layer.alpha_composite(rim)
-    return layer
+img_arr = base * (1 - mask_f[..., None]) + berry * mask_f[..., None]
+img = Image.fromarray(np.clip(img_arr, 0, 255).astype(np.uint8), "RGB")
+draw = ImageDraw.Draw(img, "RGBA")
 
+# ---------------------------------------------------------------- seeds
+# golden achenes in curving rows that follow the body contour
+def seed_pos(row_t, frac):
+    hw_r = half_width(row_t)
+    cx_r = centre_x(row_t)
+    x = cx_r + frac * hw_r * 0.92
+    y = y0 + row_t * (y1 - y0)
+    return x, y
 
-def droplets_layer() -> Image.Image:
-    """Water droplets on the flesh: bead, rim, specular dot."""
-    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    spots = []
-    for _ in range(12):
-        s = random.uniform(0.14, 0.7)
-        y = TOP + s * (BOT - TOP)
-        hw = body_half_width(s) * 0.82
-        x = CX + random.uniform(-hw, hw)
-        r = random.uniform(5, 12) * (1.15 - abs(x - CX) / (hw + 1) * 0.4)
-        spots.append((x, y, r))
-    for x, y, r in spots:
-        d.ellipse([x - r, y - r, x + r, y + r], fill=(210, 228, 238, 46))
-        d.ellipse([x - r, y - r, x + r, y + r], outline=(255, 255, 255, 90), width=1)
-        d.ellipse([x - r * 0.45, y - r * 0.5, x - r * 0.05, y - r * 0.1],
-                  fill=(255, 255, 255, 190))
-    return layer.filter(ImageFilter.GaussianBlur(0.5))
+rows = np.arange(0.08, 0.97, 0.075)
+for ri, rt in enumerate(rows):
+    n = int(5 + 5 * (1 - rt))  # fewer seeds near the tip
+    off = 0.5 if ri % 2 else 0.0
+    for k in range(n):
+        frac = -0.86 + (k + off) * (1.72 / max(n - 1, 1))
+        if abs(frac) > 0.90:
+            continue
+        x, y = seed_pos(rt, frac)
+        # seed size shrinks toward the tip, with a little organic jitter
+        sc = (1.0 - 0.35 * rt) * float(rng.uniform(0.85, 1.1))
+        # tilt follows the contour slope
+        tilt = math.degrees(math.atan2(frac * 160, 300))
+        w, h = 8.0 * sc, 12.5 * sc
+        # soft pit shadow under the seed
+        draw.ellipse([x - w, y - h * 0.7 + 3, x + w, y + h * 0.7 + 3],
+                     fill=(90, 5, 12, 80))
+        # golden seed, deeper and less cartoon-bright
+        draw.ellipse([x - w, y - h, x + w, y + h],
+                     fill=(228, 172, 62, 255), outline=(140, 88, 18, 255),
+                     width=1)
+        # tiny highlight dot
+        draw.ellipse([x - w * 0.45, y - h * 0.62, x - w * 0.05, y - h * 0.22],
+                     fill=(255, 226, 160, 255))
 
+# ---------------------------------------------------------------- calyx leaves
+leaf_base = (512, 298)
+# back layer: darker, offset angles, slightly longer for depth
+for ang_deg, length in [(-115, 165), (-70, 145), (-25, 135),
+                        (25, 135), (70, 145), (115, 165)]:
+    a = math.radians(ang_deg - 90)
+    tip = (leaf_base[0] + length * 1.15 * math.cos(a),
+           leaf_base[1] + length * math.sin(a) * 0.9 + 30)
+    px, py = -math.sin(a), math.cos(a)
+    wdt = 30
+    p1 = (leaf_base[0] + px * wdt, leaf_base[1] + py * wdt)
+    p2 = (leaf_base[0] - px * wdt, leaf_base[1] - py * wdt)
+    mid1 = (leaf_base[0] * 0.45 + tip[0] * 0.55 + px * wdt * 0.9,
+            leaf_base[1] * 0.45 + tip[1] * 0.55 + py * wdt * 0.9)
+    mid2 = (leaf_base[0] * 0.45 + tip[0] * 0.55 - px * wdt * 0.9,
+            leaf_base[1] * 0.45 + tip[1] * 0.55 - py * wdt * 0.9)
+    draw.polygon([p1, mid1, tip, mid2, p2], fill=(28, 80, 30, 255))
+leaflets = [(-135, 150), (-95, 130), (-50, 115), (0, 105),
+            (50, 115), (95, 130), (135, 150)]
+for ang_deg, length in leaflets:
+    a = math.radians(ang_deg - 90)
+    tip = (leaf_base[0] + length * 1.15 * math.cos(a),
+           leaf_base[1] + length * math.sin(a) * 0.9 + 26)
+    # leaf width perpendicular to its axis
+    px, py = -math.sin(a), math.cos(a)
+    wdt = 34 + 8 * math.sin(math.radians(ang_deg))
+    p1 = (leaf_base[0] + px * wdt, leaf_base[1] + py * wdt)
+    p2 = (leaf_base[0] - px * wdt, leaf_base[1] - py * wdt)
+    mid1 = (leaf_base[0] * 0.45 + tip[0] * 0.55 + px * wdt * 0.9,
+            leaf_base[1] * 0.45 + tip[1] * 0.55 + py * wdt * 0.9)
+    mid2 = (leaf_base[0] * 0.45 + tip[0] * 0.55 - px * wdt * 0.9,
+            leaf_base[1] * 0.45 + tip[1] * 0.55 - py * wdt * 0.9)
+    draw.polygon([p1, mid1, tip, mid2, p2], fill=(38, 102, 38, 255))
+    # centre vein, lighter green
+    draw.line([leaf_base, tip], fill=(120, 185, 96, 255), width=3)
+    # glossy edge on the upper side
+    draw.line([p1, mid1], fill=(80, 155, 70, 255), width=2)
+# small stem
+draw.line([(512, 298), (514, 232)], fill=(62, 118, 50, 255), width=11)
+draw.line([(512, 298), (514, 232)], fill=(104, 168, 84, 255), width=4)
 
-def main() -> None:
-    img = background()
-    img = img.convert("RGBA")
-    img.alpha_composite(berry_body())
-    img.alpha_composite(seeds_layer())
-    img.alpha_composite(calyx_layer())
-    img.alpha_composite(gloss_layer())
-    img.alpha_composite(droplets_layer())
-    out = img.convert("RGB")
-    out = ImageEnhance.Color(out).enhance(1.12)
-    out = ImageEnhance.Contrast(out).enhance(1.06)
-    out.save("entry.png", optimize=True)
-    print("wrote entry.png", out.size)
+# ---------------------------------------------------------------- gloss + drops
+gloss = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+gd = ImageDraw.Draw(gloss)
+gd.ellipse([300, 330, 560, 620], fill=(255, 255, 255, 60))
+gd.ellipse([330, 360, 480, 520], fill=(255, 255, 255, 54))
+gloss = gloss.filter(ImageFilter.GaussianBlur(22))
+img = Image.alpha_composite(img.convert("RGBA"), gloss)
+draw = ImageDraw.Draw(img, "RGBA")
 
+# water droplets on the body
+drops = [(430, 470, 13), (590, 430, 10), (660, 600, 15), (380, 640, 9),
+         (520, 700, 12), (610, 800, 8), (450, 830, 11), (700, 470, 7),
+         (350, 520, 8), (560, 560, 6), (480, 880, 9), (640, 700, 7)]
+for x, y, r in drops:
+    draw.ellipse([x - r, y - r, x + r, y + r],
+                 fill=(255, 255, 255, 8), outline=(255, 255, 255, 42),
+                 width=1)
+    draw.ellipse([x - r * 0.55, y - r * 0.62, x - r * 0.05, y - r * 0.12],
+                 fill=(255, 255, 255, 110))
+    draw.arc([x - r * 0.8, y - r * 0.2, x + r * 0.8, y + r * 0.9],
+             start=20, end=160, fill=(60, 0, 8, 55), width=2)
 
-if __name__ == "__main__":
-    main()
+# ---------------------------------------------------------------- vignette + grain
+# no per-pixel grain: it inflates the PNG far past the 1 MiB cap.
+# A whisper of blur-free smoothness keeps the file small instead.
+arr = np.asarray(img.convert("RGB")).astype(np.float32)
+vig = 1.0 - 0.34 * np.clip(r2 - 0.25, 0, None) ** 1.4
+arr *= vig[..., None]
+out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), "RGB")
+out.save("entry.png", optimize=True)
+print("saved entry.png", os.path.getsize("entry.png"), "bytes")
